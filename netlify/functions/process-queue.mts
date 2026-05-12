@@ -66,6 +66,7 @@ function getSupabase() {
 export default async (_req: Request) => {
   const supabase = getSupabase();
   const log: string[] = [];
+  log.push(`tick start: ${new Date().toISOString()}`);
 
   try {
     const exec = await processExecutions(supabase, log);
@@ -74,12 +75,17 @@ export default async (_req: Request) => {
 
     log.push(`tick complete: executed=${exec.executed} queued=${queue.queued} completed=${done}`);
   } catch (err) {
-    log.push(`tick error: ${err instanceof Error ? err.message : String(err)}`);
+    const msg = err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : String(err);
+    log.push(`tick error: ${msg}`);
   }
 
-  // Log to stdout so it shows up in Netlify function logs.
-  console.log(log.join("\n"));
-  return new Response("ok");
+  const output = log.join("\n");
+  // Use both stdout and stderr in case Netlify is filtering one of them.
+  console.log(output);
+  console.error(output);
+  return new Response(output || "(no log output)", {
+    headers: { "Content-Type": "text/plain" },
+  });
 };
 
 // ============================================================
