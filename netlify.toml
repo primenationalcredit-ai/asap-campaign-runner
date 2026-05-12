@@ -1,0 +1,13 @@
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
+
+# Scheduled function — processes the campaign queue every minute.
+# The actual schedule is also declared inside the function file via the
+# `schedule` export (recommended pattern in current Netlify Functions),
+# but we declare it here too so it's discoverable from the config.
+[functions."process-queue"]
+  schedule = "* * * * *"

@@ -1,0 +1,57 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html, body {
+  height: 100%;
+}
+
+body {
+  background: #fafafb;
+  color: #0e0e15;
+  font-family: 'IBM Plex Sans', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "cv02", "cv03";
+}
+
+/* Subtle dotted background for a more "ops console" feel */
+.dot-bg {
+  background-image: radial-gradient(rgba(0,63,135,.07) 1px, transparent 1px);
+  background-size: 18px 18px;
+}
+
+/* Form primitives */
+.input {
+  @apply w-full rounded-md border border-ink-200 bg-white px-3 py-2 text-sm
+         placeholder-ink-400 focus:border-brand-500 focus:outline-none focus:ring-1
+         focus:ring-brand-500;
+}
+.label {
+  @apply block text-xs font-medium uppercase tracking-wider text-ink-500;
+}
+.btn {
+  @apply inline-flex items-center justify-center rounded-md px-4 py-2 text-sm font-medium
+         transition-colors focus:outline-none focus:ring-2 focus:ring-offset-1
+         disabled:cursor-not-allowed disabled:opacity-50;
+}
+.btn-primary {
+  @apply btn bg-brand-500 text-white hover:bg-brand-600 focus:ring-brand-500;
+}
+.btn-secondary {
+  @apply btn border border-ink-200 bg-white text-ink-700 hover:bg-ink-50 focus:ring-ink-300;
+}
+.btn-danger {
+  @apply btn bg-red-600 text-white hover:bg-red-700 focus:ring-red-500;
+}
+.card {
+  @apply rounded-lg border border-ink-200 bg-white shadow-sm;
+}
+.pill {
+  @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium;
+}
