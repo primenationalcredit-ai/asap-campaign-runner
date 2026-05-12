@@ -26,7 +26,7 @@ import { DateTime } from "luxon";
 // build target), so we inline imports from src/lib via relative
 // paths. Netlify will bundle these.
 import {
-  iterateDeals,
+  iterateDealsWithCursor,
   updateDealField,
 } from "../../src/lib/pipedrive";
 import {
@@ -223,70 +223,66 @@ async function processQueueing(supabase: ReturnType<typeof getSupabase>, log: st
     randomize_within_minute: campaign.randomize_within_minute,
   };
 
-  // Iterate Pipedrive starting after the stored cursor (we walk
-  // pages from the beginning each time, but pre-filter cursor
-  // state. With v2 cursor pagination, the cursor IS the resume
-  // point — see notes below.)
-  //
-  // NOTE: Pipedrive v2 cursors are opaque strings. Our iterateDeals
-  // helper streams from start each time it's called; to resume,
-  // we'd ideally pass the stored cursor in. For correctness within
-  // the time budget, we instead use deal IDs as a stable cursor —
-  // we sort by ID asc and skip until we're past the last seen ID.
-  //
-  // ...except v2's /deals endpoint doesn't accept an "after_id"
-  // filter directly. So for v1 we accept the simpler design:
-  // each tick re-walks pages and skips deals that already have a
-  // queue_items row. This is N^2-ish for very large audiences
-  // but for 30K split across 15 minutes it's <500K row reads,
-  // which Supabase handles fine.
-  //
-  // For better than that we can switch to a stored cursor in a
-  // future version, but this is correct and resumable.
-
   const tickStart = Date.now();
-  const TICK_BUDGET_MS = 20_000; // leave headroom under the 26s sync max
+  const TICK_BUDGET_MS = 20_000;
 
   let seen = campaign.launch_state?.deals_seen ?? 0;
   let queuedThisTick = 0;
+  let skippedThisTick = 0;
   let cursorScheduledAt = campaign.launch_state?.next_scheduled_at
     ? new Date(campaign.launch_state.next_scheduled_at)
     : new Date();
+  const startCursor: string | null = campaign.launch_state?.pipedrive_cursor ?? null;
 
-  // Build a set of already-queued deal IDs for this campaign to
-  // skip on re-iteration. For a 30K campaign this is at most
-  // 30K integers in memory — trivial.
-  const { data: existing } = await supabase
-    .from("queue_items")
-    .select("pipedrive_deal_id")
-    .eq("campaign_id", campaign.id);
-  const alreadyQueued = new Set<number>(
-    (existing ?? []).map((r: { pipedrive_deal_id: number }) => r.pipedrive_deal_id)
-  );
+  // On the very first tick (no stored cursor yet), pre-load any rows
+  // already in queue_items so we don't double-queue. Subsequent ticks
+  // use the cursor to resume, so they only see fresh deals and can
+  // skip this expensive query.
+  let alreadyQueued = new Set<number>();
+  if (!startCursor) {
+    const { data: existing } = await supabase
+      .from("queue_items")
+      .select("pipedrive_deal_id")
+      .eq("campaign_id", campaign.id);
+    alreadyQueued = new Set<number>(
+      (existing ?? []).map((r: { pipedrive_deal_id: number }) => r.pipedrive_deal_id)
+    );
+  }
 
   let reachedEnd = true;
+  let nextCursor: string | null = startCursor;
   const pendingInserts: Array<Record<string, unknown>> = [];
 
-  outer: for await (const batch of iterateDeals(opts)) {
+  outer: for await (const { batch, nextCursor: cur } of iterateDealsWithCursor({
+    ...opts,
+    startCursor,
+  })) {
+    nextCursor = cur;
+
     for (const deal of batch as PipedriveDealV2[]) {
       seen++;
       if (alreadyQueued.has(deal.id)) continue;
 
       const resolved = resolveUpdateDealFieldAction(deal, actionCfg);
       if (!resolved) {
-        // Skipped — mark on campaign aggregate without storing a
-        // queue row.
-        await supabase
-          .from("campaigns")
-          .update({ skipped_count: (campaign.skipped_count ?? 0) + 1 })
-          .eq("id", campaign.id);
-        campaign.skipped_count = (campaign.skipped_count ?? 0) + 1;
+        // Persist the skip so we never inspect this deal again on
+        // resume. We use the queue_items table itself with
+        // status='skipped' to keep all per-deal state in one place.
+        pendingInserts.push({
+          campaign_id: campaign.id,
+          pipedrive_deal_id: deal.id,
+          pipedrive_deal_title: deal.title?.slice(0, 200) ?? null,
+          action_payload: { type: "skipped", reason: "no chain match" },
+          scheduled_at: new Date().toISOString(), // unused for skipped
+          status: "skipped",
+        });
+        alreadyQueued.add(deal.id);
+        skippedThisTick++;
         continue;
       }
 
-      // Schedule one slot per to-be-queued deal.
       const [slot] = distributeSlots(cursorScheduledAt, 1, rules);
-      cursorScheduledAt = new Date(new Date(slot).getTime() + 1); // nudge past it
+      cursorScheduledAt = new Date(new Date(slot).getTime() + 1);
 
       pendingInserts.push({
         campaign_id: campaign.id,
@@ -296,7 +292,7 @@ async function processQueueing(supabase: ReturnType<typeof getSupabase>, log: st
         scheduled_at: slot,
         status: "pending",
       });
-
+      alreadyQueued.add(deal.id);
       queuedThisTick++;
 
       // Periodic flush to Supabase
@@ -313,6 +309,13 @@ async function processQueueing(supabase: ReturnType<typeof getSupabase>, log: st
         break outer;
       }
     }
+
+    // After a page completes, if the cursor is null Pipedrive has no
+    // more pages — we've reached the end.
+    if (cur === null) {
+      reachedEnd = true;
+      break;
+    }
   }
 
   // Final flush
@@ -323,15 +326,17 @@ async function processQueueing(supabase: ReturnType<typeof getSupabase>, log: st
     if (ie) log.push(`queue: final insert error: ${ie.message}`);
   }
 
-  // Update campaign state
+  // Update campaign state. Skipped count is batched at the tick
+  // boundary instead of one DB write per skipped deal.
+  const newSkippedCount = (campaign.skipped_count ?? 0) + skippedThisTick;
   const newState = {
     next_scheduled_at: cursorScheduledAt.toISOString(),
+    pipedrive_cursor: reachedEnd ? null : nextCursor,
     deals_seen: seen,
     deals_queued: (campaign.launch_state?.deals_queued ?? 0) + queuedThisTick,
   };
 
   if (reachedEnd) {
-    // Done queueing. Flip to 'running' and compute final stats.
     const totalQueued = newState.deals_queued;
     const lastSlotIso = cursorScheduledAt.toISOString();
 
@@ -343,20 +348,22 @@ async function processQueueing(supabase: ReturnType<typeof getSupabase>, log: st
         total_items: totalQueued,
         audience_snapshot_count: seen,
         estimated_completion_at: lastSlotIso,
+        skipped_count: newSkippedCount,
       })
       .eq("id", campaign.id);
 
-    log.push(`queue: campaign ${campaign.id} fully queued (seen=${seen}, queued=${totalQueued})`);
+    log.push(`queue: campaign ${campaign.id} fully queued (seen=${seen}, queued=${totalQueued}, skipped=${newSkippedCount})`);
   } else {
     await supabase
       .from("campaigns")
       .update({
         launch_state: newState,
         total_items: newState.deals_queued,
+        skipped_count: newSkippedCount,
       })
       .eq("id", campaign.id);
 
-    log.push(`queue: campaign ${campaign.id} partial (seen=${seen}, queued+=${queuedThisTick})`);
+    log.push(`queue: campaign ${campaign.id} partial (seen=${seen}, queued+=${queuedThisTick}, skipped+=${skippedThisTick})`);
   }
 
   return { queued: queuedThisTick };

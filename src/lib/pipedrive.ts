@@ -183,6 +183,19 @@ interface DealListOpts {
 export async function* iterateDeals(
   opts: DealListOpts
 ): AsyncGenerator<PipedriveDealV2[]> {
+  for await (const { batch } of iterateDealsWithCursor(opts)) {
+    yield batch;
+  }
+}
+
+/**
+ * Like `iterateDeals` but also yields the cursor for each page so the
+ * caller can persist progress and resume from where it left off across
+ * multiple invocations. Pass `opts.startCursor` to resume.
+ */
+export async function* iterateDealsWithCursor(
+  opts: DealListOpts & { startCursor?: string | null }
+): AsyncGenerator<{ batch: PipedriveDealV2[]; nextCursor: string | null }> {
   const params = new URLSearchParams();
   params.set("limit", "500");
   if (opts.filter_id) params.set("filter_id", String(opts.filter_id));
@@ -192,7 +205,7 @@ export async function* iterateDeals(
     params.set("custom_fields", opts.custom_fields.slice(0, 15).join(","));
   }
 
-  let cursor: string | undefined;
+  let cursor: string | null | undefined = opts.startCursor;
   while (true) {
     if (cursor) params.set("cursor", cursor);
     else params.delete("cursor");
@@ -204,9 +217,8 @@ export async function* iterateDeals(
     }>(`/deals?${params.toString()}`);
 
     const batch = r.data ?? [];
-    if (batch.length > 0) yield batch;
-
-    const next = r.additional_data?.next_cursor;
+    const next = r.additional_data?.next_cursor ?? null;
+    if (batch.length > 0) yield { batch, nextCursor: next };
     if (!next) break;
     cursor = next;
   }
