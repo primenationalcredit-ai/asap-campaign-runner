@@ -75,15 +75,23 @@ export function resolveUpdateDealFieldAction(
     if (valuesEqual(current, next)) return null;
   } else {
     // Chain mode: find a step whose `from_value` matches the
-    // deal's current value. If no match, skip.
+    // deal's current value. If no match, fall through to
+    // `else_to_value` (catch-all) if configured, otherwise skip.
     const step = cfg.chain?.find((s: ChainStep) =>
       valuesEqual(normalize(s.from_value), current)
     );
-    if (!step) return null;
-    next = normalize(step.to_value);
-    // If to_value is null OR equals current, treat as a no-op skip.
-    // (Joe's chain: ...21 → null means "stop at 21". A row at 21
-    // matches `from_value: 21, to_value: null` and we skip it.)
+    if (step) {
+      next = normalize(step.to_value);
+    } else if (cfg.else_to_value !== undefined && cfg.else_to_value !== null) {
+      // Catch-all: route any unmatched current value to this default.
+      // Common use case: "any deal not currently in my sequence,
+      // start them at step 1."
+      next = normalize(cfg.else_to_value);
+    } else {
+      return null;
+    }
+    // If `to_value` was null (explicit "stop" step) OR equals current,
+    // treat as no-op skip.
     if (next === null) return null;
     if (valuesEqual(current, next)) return null;
   }

@@ -30,7 +30,8 @@ export type QueueItemStatus =
  *                        based on its current field value. A `from_value`
  *                        of null matches deals where the field is blank.
  *                        Deals whose current value isn't in the chain
- *                        are skipped (status = 'skipped').
+ *                        are routed to `else_to_value` if set, otherwise
+ *                        skipped (status = 'skipped').
  */
 export interface UpdateDealFieldConfig {
   field_key: string;        // 40-char Pipedrive custom field hash
@@ -46,6 +47,9 @@ export interface UpdateDealFieldConfig {
   value_mode: "fixed" | "chain";
   fixed_value?: string | number | null;
   chain?: ChainStep[];
+  /** Catch-all: if set, deals whose current value matches no chain
+   *  step are routed to this value (instead of being skipped). */
+  else_to_value?: string | number | null;
 }
 
 export interface ChainStep {

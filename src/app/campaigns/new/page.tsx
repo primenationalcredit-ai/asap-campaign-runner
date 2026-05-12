@@ -64,6 +64,8 @@ export default function NewCampaignPage() {
   const [valueMode, setValueMode] = useState<"fixed" | "chain">("chain");
   const [fixedValue, setFixedValue] = useState<string>("");
   const [chain, setChain] = useState<ChainStep[]>([]);
+  const [hasElseTo, setHasElseTo] = useState(false);
+  const [elseToValue, setElseToValue] = useState<number | null>(null);
 
   const [ratePerMinute, setRatePerMinute] = useState<number>(1);
   const [bizStart, setBizStart] = useState("08:00");
@@ -167,6 +169,9 @@ export default function NewCampaignPage() {
             : fixedValue;
       } else {
         action_config.chain = chain;
+        if (hasElseTo && elseToValue !== null) {
+          action_config.else_to_value = elseToValue;
+        }
       }
 
       const skipDates = customSkipDates
@@ -383,6 +388,39 @@ export default function NewCampaignPage() {
                                 onClick={() => removeChainStep(i)}>✕</button>
                       </div>
                     ))}
+                  </div>
+
+                  {/* Catch-all (else_to_value) */}
+                  <div className="mt-4 pt-4 border-t border-ink-200">
+                    <label className="flex items-start gap-2 text-sm cursor-pointer">
+                      <input
+                        type="checkbox"
+                        className="mt-1"
+                        checked={hasElseTo}
+                        onChange={(e) => setHasElseTo(e.target.checked)}
+                      />
+                      <span>
+                        <span className="font-medium text-ink-800">
+                          If a deal&apos;s current value doesn&apos;t match any step above, route it to:
+                        </span>
+                        <span className="block text-xs text-ink-500 mt-0.5">
+                          Useful when the same field is used for multiple campaign sequences and you want to pull stragglers into this one. Without this, deals at unrecognized values are skipped.
+                        </span>
+                      </span>
+                    </label>
+                    {hasElseTo && (
+                      <div className="mt-2 ml-6">
+                        <ChainValuePicker
+                          field={selectedField}
+                          value={elseToValue}
+                          onChange={(v) => setElseToValue(v)}
+                          allowBlank={false}
+                        />
+                        <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2 mt-2">
+                          ⚠️ <strong>Terminal values:</strong> if you have an &ldquo;end state&rdquo; like Missed Opps 21 that should NOT be touched, add an explicit chain step with the SAME value for From and To (e.g. <code>Missed Opps 21 → Missed Opps 21</code>). That counts as a chain match and won&apos;t fall to the catch-all.
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
