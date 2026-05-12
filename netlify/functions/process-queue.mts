@@ -272,6 +272,11 @@ async function processQueueing(supabase: ReturnType<typeof getSupabase>, log: st
   }> = [];
   const pendingSkippedInserts: Array<Record<string, unknown>> = [];
 
+  // DEBUG: log a sample of skipped deals so we can see what their
+  // actual custom field values look like in Pipedrive's response.
+  let skippedSamplesLogged = 0;
+  const SKIP_SAMPLE_LIMIT = 5;
+
   outer: for await (const { batch, nextCursor: cur } of iterateDealsWithCursor({
     ...opts,
     startCursor,
@@ -284,6 +289,15 @@ async function processQueueing(supabase: ReturnType<typeof getSupabase>, log: st
 
       const resolved = resolveUpdateDealFieldAction(deal, actionCfg);
       if (!resolved) {
+        // DEBUG: log the first few skipped deals' field values.
+        if (skippedSamplesLogged < SKIP_SAMPLE_LIMIT) {
+          const rawValue = deal.custom_fields?.[actionCfg.field_key];
+          log.push(
+            `DEBUG skip: deal=${deal.id} title="${(deal.title ?? "").slice(0, 40)}" ` +
+            `value=${JSON.stringify(rawValue)} type=${typeof rawValue}`
+          );
+          skippedSamplesLogged++;
+        }
         // Persist the skip as a queue_items row so we never inspect
         // this deal again. status='skipped' means the executor ignores
         // it. The scheduled_at is irrelevant (executor filters by
