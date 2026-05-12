@@ -88,7 +88,9 @@ function advanceToBusinessMinute(
  * starting at `startUtc` (or as soon thereafter as is eligible).
  *
  * Returns ISO timestamps (UTC) suitable for inserting into the
- * `queue_items.scheduled_at` column.
+ * `queue_items.scheduled_at` column, plus the cursor representing
+ * "where the next call should start" — past the last slot, advanced
+ * by one interval, then advanced to the next valid business minute.
  *
  * NOTE: We intentionally compute slots one-by-one rather than via
  * a math formula because the eligibility rules (weekend skip,
@@ -99,9 +101,7 @@ export function distributeSlots(
   startUtc: Date,
   count: number,
   rules: PacingRules
-): string[] {
-  if (count <= 0) return [];
-
+): { slots: string[]; nextCursorUtc: Date } {
   const intervalMs = (60 * 1000) / rules.rate_per_minute;
   const zone = rules.timezone;
   let cursor = DateTime.fromJSDate(startUtc, { zone });
@@ -109,7 +109,7 @@ export function distributeSlots(
   // Jump cursor forward to the first eligible minute.
   cursor = advanceToBusinessMinute(cursor, rules);
 
-  const out: string[] = [];
+  const slots: string[] = [];
   for (let i = 0; i < count; i++) {
     let slot = cursor;
 
@@ -121,14 +121,14 @@ export function distributeSlots(
       slot = slot.set({ second: 0, millisecond: 0 }).plus({ milliseconds: jitterMs });
     }
 
-    out.push(slot.toUTC().toISO()!);
+    slots.push(slot.toUTC().toISO()!);
 
     // Advance cursor by the interval, then re-validate.
     cursor = cursor.plus({ milliseconds: intervalMs });
     cursor = advanceToBusinessMinute(cursor, rules);
   }
 
-  return out;
+  return { slots, nextCursorUtc: cursor.toUTC().toJSDate() };
 }
 
 /**
@@ -142,9 +142,7 @@ export function estimateCompletion(
   rules: PacingRules
 ): Date | null {
   if (count <= 0) return null;
-  // Compute the LAST slot only — that's the finish time.
-  // Cheap shortcut: distribute and read the tail. For 30K this is fine.
-  const slots = distributeSlots(startUtc, count, rules);
+  const { slots } = distributeSlots(startUtc, count, rules);
   if (slots.length === 0) return null;
   return new Date(slots[slots.length - 1]);
 }

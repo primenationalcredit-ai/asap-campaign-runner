@@ -251,7 +251,20 @@ async function processQueueing(supabase: ReturnType<typeof getSupabase>, log: st
 
   let reachedEnd = true;
   let nextCursor: string | null = startCursor;
-  const pendingInserts: Array<Record<string, unknown>> = [];
+  let stopAfterThisPage = false;
+
+  // Items to be queued in this tick. We collect them all first, then
+  // compute their scheduled_at timestamps in one `distributeSlots`
+  // call at the end of the tick. Computing slots one-at-a-time was
+  // broken because the random-within-minute jitter resets the cursor
+  // to the start of the minute each iteration; effectively, every
+  // slot ended up in the same minute. Batching the call fixes that.
+  const itemsToQueueWithoutSlot: Array<{
+    dealId: number;
+    dealTitle: string | null;
+    actionPayload: unknown;
+  }> = [];
+  const pendingSkippedInserts: Array<Record<string, unknown>> = [];
 
   outer: for await (const { batch, nextCursor: cur } of iterateDealsWithCursor({
     ...opts,
@@ -265,15 +278,16 @@ async function processQueueing(supabase: ReturnType<typeof getSupabase>, log: st
 
       const resolved = resolveUpdateDealFieldAction(deal, actionCfg);
       if (!resolved) {
-        // Persist the skip so we never inspect this deal again on
-        // resume. We use the queue_items table itself with
-        // status='skipped' to keep all per-deal state in one place.
-        pendingInserts.push({
+        // Persist the skip as a queue_items row so we never inspect
+        // this deal again. status='skipped' means the executor ignores
+        // it. The scheduled_at is irrelevant (executor filters by
+        // status='pending') but the column is NOT NULL.
+        pendingSkippedInserts.push({
           campaign_id: campaign.id,
           pipedrive_deal_id: deal.id,
           pipedrive_deal_title: deal.title?.slice(0, 200) ?? null,
           action_payload: { type: "skipped", reason: "no chain match" },
-          scheduled_at: new Date().toISOString(), // unused for skipped
+          scheduled_at: new Date().toISOString(),
           status: "skipped",
         });
         alreadyQueued.add(deal.id);
@@ -281,49 +295,59 @@ async function processQueueing(supabase: ReturnType<typeof getSupabase>, log: st
         continue;
       }
 
-      const [slot] = distributeSlots(cursorScheduledAt, 1, rules);
-      cursorScheduledAt = new Date(new Date(slot).getTime() + 1);
-
-      pendingInserts.push({
-        campaign_id: campaign.id,
-        pipedrive_deal_id: deal.id,
-        pipedrive_deal_title: deal.title?.slice(0, 200) ?? null,
-        action_payload: resolved.action_payload,
-        scheduled_at: slot,
-        status: "pending",
+      itemsToQueueWithoutSlot.push({
+        dealId: deal.id,
+        dealTitle: deal.title?.slice(0, 200) ?? null,
+        actionPayload: resolved.action_payload,
       });
       alreadyQueued.add(deal.id);
       queuedThisTick++;
 
-      // Periodic flush to Supabase
-      if (pendingInserts.length >= QUEUE_INSERT_CHUNK) {
-        const chunk = pendingInserts.splice(0, QUEUE_INSERT_CHUNK);
-        const { error: ie } = await supabase
-          .from("queue_items")
-          .upsert(chunk, { onConflict: "campaign_id,pipedrive_deal_id", ignoreDuplicates: true });
-        if (ie) log.push(`queue: insert error: ${ie.message}`);
-      }
-
+      // Mark for break, but don't break mid-page. Finishing the page
+      // ensures the saved cursor genuinely represents "everything in
+      // this page is handled" so resume from `nextCursor` is correct.
       if (queuedThisTick >= MAX_QUEUE_BATCH || Date.now() - tickStart > TICK_BUDGET_MS) {
-        reachedEnd = false;
-        break outer;
+        stopAfterThisPage = true;
       }
     }
 
-    // After a page completes, if the cursor is null Pipedrive has no
-    // more pages — we've reached the end.
+    // End-of-page boundary
     if (cur === null) {
       reachedEnd = true;
       break;
     }
+    if (stopAfterThisPage) {
+      reachedEnd = false;
+      break;
+    }
   }
 
-  // Final flush
-  if (pendingInserts.length > 0) {
+  // Compute slots for everything we want to queue this tick, in one
+  // batched call so the time-spacing math actually works.
+  const { slots, nextCursorUtc: newScheduleCursor } = distributeSlots(
+    cursorScheduledAt,
+    itemsToQueueWithoutSlot.length,
+    rules
+  );
+  cursorScheduledAt = newScheduleCursor;
+
+  const pendingQueuedInserts = itemsToQueueWithoutSlot.map((item, i) => ({
+    campaign_id: campaign.id,
+    pipedrive_deal_id: item.dealId,
+    pipedrive_deal_title: item.dealTitle,
+    action_payload: item.actionPayload,
+    scheduled_at: slots[i],
+    status: "pending",
+  }));
+
+  // Combine and chunk-insert
+  const allInserts = [...pendingQueuedInserts, ...pendingSkippedInserts];
+  for (let i = 0; i < allInserts.length; i += QUEUE_INSERT_CHUNK) {
+    const chunk = allInserts.slice(i, i + QUEUE_INSERT_CHUNK);
     const { error: ie } = await supabase
       .from("queue_items")
-      .upsert(pendingInserts, { onConflict: "campaign_id,pipedrive_deal_id", ignoreDuplicates: true });
-    if (ie) log.push(`queue: final insert error: ${ie.message}`);
+      .upsert(chunk, { onConflict: "campaign_id,pipedrive_deal_id", ignoreDuplicates: true });
+    if (ie) log.push(`queue: insert error: ${ie.message}`);
   }
 
   // Update campaign state. Skipped count is batched at the tick
