@@ -121,7 +121,10 @@ export async function listPipelines(): Promise<PipedrivePipeline[]> {
   const r = await v2<{ success: boolean; data: PipedrivePipeline[] | null }>(
     `/pipelines`
   );
-  return (r.data ?? []).filter((p) => p.active);
+  // Don't filter by `.active` — v2 pipelines API doesn't return that
+  // field (it was a v1 thing). v2 uses soft-delete, and the endpoint
+  // already excludes deleted pipelines by default.
+  return r.data ?? [];
 }
 
 export async function listStages(
